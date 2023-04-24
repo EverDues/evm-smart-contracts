@@ -3,6 +3,8 @@ pragma solidity >=0.8.4;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "./MultiOwnable.sol";
 
 /**
  * @title Recurring Payments & Subscriptions on EVM
@@ -12,17 +14,19 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  * recurring payments that can be cancelled anytime.
  */
 
-contract RecurringPayments {
+contract RecurringPayments is MultiOwnable {
     using SafeERC20 for IERC20;
 
     event NewSubscription(string, bytes32);
 
-    event SubscriptionCancelled();
+    event SubscriptionCancelled(string);
 
     event SubscriptionPaid();
 
     // Mapping to hold information about a user's subscription using subsctiption ID and timestamp of the last payment execution
     mapping(bytes32 => uint32) subscriptions;
+
+    address gas_proxy_address;
 
     struct PaymentData {
         address customer;
@@ -30,10 +34,15 @@ contract RecurringPayments {
         address payee;
         uint32 value;
         uint32 period;
+        uint8 networkFee;
         string ipfsHash;
     }
 
-    constructor() {}
+    uint8 constant MAX_NETWORK_FEE = 5; //%
+
+    function setGasProxyAddress(address _gas_proxy_address) external onlyRole(OWNER_ROLE) {
+        gas_proxy_address = _gas_proxy_address;
+    }
 
     /**
      * @dev Creates a new subscription for the specified customer.
@@ -46,9 +55,9 @@ contract RecurringPayments {
     function createSubscription(
         address _payee, 
         uint32 _value, 
-        address _token, 
+        address _token,
         string calldata _ipfsHash, // any additional metadata which user provides (used on backend side to propagate to another chain, embedded into _sid)
-        bytes32 _sid // (should be additionally verified off-chain before any action _sid should be calculated from encodeSubscriptionId)
+        bytes32 _sid // (should be additionally verified off-chain before any action _sid should be calculated from encodeSubscriptionId and match transaction parameters),
     ) external {
         bytes32 sid = keccak256(abi.encodePacked(msg.sender, _sid));
         require(
@@ -75,7 +84,7 @@ contract RecurringPayments {
     ) external virtual {
         bytes32 sid = keccak256(abi.encodePacked(msg.sender, encodeSubscriptionId(_token, _payee, _value, _period, _ipfsHash)));
         subscriptions[sid] = 0;
-        emit SubscriptionCancelled();
+        emit SubscriptionCancelled(_ipfsHash);
     }
 
     /**
@@ -85,6 +94,7 @@ contract RecurringPayments {
      * @param _payee The payee address to send subscription payments to.
      * @param _value The cost of the subscription.
      * @param _period The subscription period.
+     * @param  _payeeFee The transaction gas fee (calculated off-chain depending on gas price, gas token price and value)
      * @param _ipfsHash The IPFS hash of external data. Period supposed to be added into IPFS hash to save additional gas.
      */
     function executePayment(
@@ -93,22 +103,24 @@ contract RecurringPayments {
         address _payee,
         uint32 _value,
         uint32 _period,
+        uint8 _payeeFee,
         string calldata _ipfsHash
-    ) public {
+    ) private {
         bytes32 sid = keccak256(abi.encodePacked(_customer, encodeSubscriptionId(_token, _payee, _value, _period, _ipfsHash)));
-        uint32 subscriptionTime = subscriptions[sid];
-        require(subscriptionTime != 0, "Subscription does not exist or has been cancelled.");
+        require(subscriptions[sid] != 0, "Subscription does not exist or has been cancelled.");
         require(_period != 0, "It's lifetime subscription.");
-        uint32 elapsedTime = uint32(block.timestamp) - subscriptionTime;
+        require(_payeeFee <= MAX_NETWORK_FEE, "network fee cannot be more then MAX_NETWORK_FEE%.");
+        uint32 elapsedTime = uint32(block.timestamp) - subscriptions[sid];
         uint32 preprocessingWindow = (_period < 28 days) ? ((_period * 3) / 4) : (_period - 7 days);
         require(elapsedTime > preprocessingWindow, "Subscription has already been paid for this period.");
-        subscriptionTime = (elapsedTime >= _period) ? uint32(block.timestamp) + _period : subscriptionTime + _period;
+        uint32 payeeFee = (_value * _payeeFee) / 100;
         if (elapsedTime <= _period) {
             subscriptions[sid] += _period;
         } else {
             subscriptions[sid] = uint32(block.timestamp + _period);
         }
-        IERC20(_token).safeTransferFrom(_customer, _payee, _value);
+        IERC20(_token).safeTransferFrom(_customer, _payee, _value - payeeFee);
+        IERC20(_token).safeTransferFrom(_customer, gas_proxy_address, payeeFee);
         emit SubscriptionPaid();
     }
 
@@ -117,7 +129,7 @@ contract RecurringPayments {
      */
     function batchExecutePayment(
         PaymentData[] calldata payments
-    ) external {
+    ) external onlyRole(OWNER_ROLE) {
         for (uint256 i = 0; i < payments.length; i++) {
             executePayment(
                 payments[i].customer,
@@ -125,6 +137,7 @@ contract RecurringPayments {
                 payments[i].payee,
                 payments[i].value,
                 payments[i].period,
+                payments[i].networkFee,
                 payments[i].ipfsHash
             );
         }
