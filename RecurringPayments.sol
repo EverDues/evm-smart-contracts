@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity >=0.8.4;
+pragma solidity ^0.8.7;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -22,10 +22,16 @@ contract RecurringPayments is MultiOwnable {
 
     event SubscriptionPaid();
 
-    // Mapping to hold information about a user's subscription using subsctiption ID and timestamp of the last payment execution
-    mapping(bytes32 => uint32) subscriptions;
+    error AlreadyExist();
+    error AlreadyPaid();
+    error NotExist();
+    error Lifetime();
+    error FeeLimit(); 
 
-    address gas_proxy_address;
+    // Mapping to hold information about a user's subscription using subsctiption ID and timestamp of the last payment execution
+    mapping(bytes32 => uint32) public subscriptions;
+
+    address public gas_proxy_address;
 
     struct PaymentData {
         address customer;
@@ -37,9 +43,13 @@ contract RecurringPayments is MultiOwnable {
         string ipfsHash;
     }
 
-    uint8 constant MAX_NETWORK_FEE = 5; //%
+    uint8 constant internal MAX_NETWORK_FEE = 5; //%
 
-    function setGasProxyAddress(address _gas_proxy_address) external onlyRole(OWNER_ROLE) {
+    constructor(address _gas_proxy_address) {
+        gas_proxy_address = _gas_proxy_address;
+    }
+
+    function changeGasProxyAddress(address _gas_proxy_address) external onlyRole(DEFAULT_ADMIN_ROLE) {
         gas_proxy_address = _gas_proxy_address;
     }
 
@@ -59,10 +69,9 @@ contract RecurringPayments is MultiOwnable {
         bytes32 _sid // (should be additionally verified off-chain before any action _sid should be calculated from encodeSubscriptionId and match transaction parameters),
     ) external {
         bytes32 sid = keccak256(abi.encodePacked(msg.sender, _sid));
-        require(
-            subscriptions[sid] == 0,
-            "Active subscription already exists."
-        );
+        if(subscriptions[sid] != 0) {
+            revert AlreadyExist();
+        }
         subscriptions[sid] = uint32(block.timestamp);
         IERC20(_token).safeTransferFrom(msg.sender, _payee, _value);
         emit NewSubscription(_ipfsHash, _sid);
@@ -82,6 +91,9 @@ contract RecurringPayments is MultiOwnable {
         string calldata _ipfsHash
     ) external virtual {
         bytes32 sid = keccak256(abi.encodePacked(msg.sender, encodeSubscriptionId(_token, _payee, _value, _period, _ipfsHash)));
+        if(subscriptions[sid] == 0) {
+            revert NotExist();
+        }
         subscriptions[sid] = 0;
         emit SubscriptionCancelled(_ipfsHash);
     }
@@ -106,12 +118,20 @@ contract RecurringPayments is MultiOwnable {
         string calldata _ipfsHash
     ) private {
         bytes32 sid = keccak256(abi.encodePacked(_customer, encodeSubscriptionId(_token, _payee, _value, _period, _ipfsHash)));
-        require(subscriptions[sid] != 0, "Subscription does not exist or has been cancelled.");
-        require(_period != 0, "It's lifetime subscription.");
-        require(_payeeFee <= MAX_NETWORK_FEE, "network fee cannot be more then MAX_NETWORK_FEE%.");
+        if (subscriptions[sid] == 0) {
+            revert NotExist();
+        }
+        if (_period == 0) {
+           revert Lifetime();
+        }
+        if (_payeeFee > MAX_NETWORK_FEE) {
+            revert FeeLimit();
+        }
         uint32 elapsedTime = uint32(block.timestamp) - subscriptions[sid];
         uint32 preprocessingWindow = (_period < 28 days) ? ((_period * 3) / 4) : (_period - 7 days);
-        require(elapsedTime > preprocessingWindow, "Subscription has already been paid for this period.");
+        if(elapsedTime < preprocessingWindow) {
+            revert AlreadyPaid();
+        }
         uint32 payeeFee = (_value * _payeeFee) / 100;
         if (elapsedTime <= _period) {
             subscriptions[sid] += _period;

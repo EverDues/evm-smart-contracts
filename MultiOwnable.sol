@@ -7,6 +7,7 @@ contract MultiOwnable is AccessControlEnumerable  {
     bytes32 public constant OWNER_ROLE = keccak256("OWNER_ROLE");
 
     constructor() {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _setupRole(OWNER_ROLE, msg.sender);
     }
 
