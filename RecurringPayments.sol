@@ -16,9 +16,9 @@ import "./MultiOwnable.sol";
 contract RecurringPayments is MultiOwnable {
     using SafeERC20 for IERC20;
 
-    event NewSubscription(string, bytes32);
+    event NewSubscription();
 
-    event SubscriptionCancelled(string);
+    event SubscriptionCancelled();
 
     event SubscriptionPaid();
 
@@ -58,23 +58,23 @@ contract RecurringPayments is MultiOwnable {
      * @param _payee The payee address to send subscription payments to.
      * @param _value The cost of the subscription.
      * @param _token The token used to pay for the subscription.
+     * @param _period The subscription period.
      * @param _ipfsHash The IPFS hash of external data. Period supposed to be added into IPFS hash to save additional gas.
-     * @param _sid The unique identifier of the subscription.
      */
     function createSubscription(
         address _payee, 
         uint32 _value, 
         address _token,
-        string calldata _ipfsHash, // any additional metadata which user provides (used on backend side to propagate to another chain, embedded into _sid)
-        bytes32 _sid // (should be additionally verified off-chain before any action _sid should be calculated from encodeSubscriptionId and match transaction parameters),
+        uint32 _period,
+        string calldata _ipfsHash // any additional metadata which user provides (used on backend side to propagate to another chain, embedded into _sid)
     ) external {
-        bytes32 sid = keccak256(abi.encodePacked(msg.sender, _sid));
+        bytes32 sid = keccak256(abi.encodePacked(msg.sender, encodeSubscriptionId(_token, _payee, _value, _period, _ipfsHash)));
         if(subscriptions[sid] != 0) {
             revert AlreadyExist();
         }
         subscriptions[sid] = uint32(block.timestamp);
         IERC20(_token).safeTransferFrom(msg.sender, _payee, _value);
-        emit NewSubscription(_ipfsHash, _sid);
+        emit NewSubscription();
     }
 
     /** @dev Cancels an existing subscription for a customer.
@@ -95,7 +95,7 @@ contract RecurringPayments is MultiOwnable {
             revert NotExist();
         }
         subscriptions[sid] = 0;
-        emit SubscriptionCancelled(_ipfsHash);
+        emit SubscriptionCancelled();
     }
 
     /**
